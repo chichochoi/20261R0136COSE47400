@@ -447,6 +447,25 @@ New deep_learning_mid_unet_cvae:
 
     original image | reconstruction using original label
 
+  The reconstruction output sampler does not simply save the first N validation
+  images. It randomly selects a balanced number of images from each dementia
+  stage.
+
+  Default output sampling:
+
+    5 Non Demented samples
+    5 Very mild Dementia samples
+    5 Mild Dementia samples
+
+  The number can be changed with:
+
+    --samples-per-stage
+
+  The sampler uses the provided seed for reproducibility and tries to choose
+  different subjects within each stage when possible. This avoids producing all
+  reconstruction examples from the same patient just because adjacent validation
+  images come from the same subject.
+
 Existing advancedML_team_I:
 
   generate_conditional_image and save_comparison support:

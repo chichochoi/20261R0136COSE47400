@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import random
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cvae-checkpoint", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default="outputs/reconstructions")
     parser.add_argument("--split", type=str, choices=["train", "val", "all"], default="val")
-    parser.add_argument("--num-samples", type=int, default=16)
+    parser.add_argument("--samples-per-stage", type=int, default=5)
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
@@ -42,6 +43,50 @@ def load_cvae(path: str, device: torch.device) -> MidUNetCVAE:
     return model
 
 
+def select_balanced_indices(
+    dataset: MRISliceDataset,
+    samples_per_stage: int,
+    seed: int,
+) -> list[int]:
+    rng = random.Random(seed)
+    by_label_subject: dict[int, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+
+    for index, record in enumerate(dataset.records):
+        by_label_subject[record.label][record.subject_id].append(index)
+
+    selected: list[int] = []
+    for label in sorted(INDEX_TO_CLASS):
+        subject_to_indices = by_label_subject.get(label, {})
+        subjects = list(subject_to_indices)
+        rng.shuffle(subjects)
+
+        label_selected: list[int] = []
+        for subject in subjects[:samples_per_stage]:
+            label_selected.append(rng.choice(subject_to_indices[subject]))
+
+        if len(label_selected) < samples_per_stage:
+            already_selected = set(label_selected)
+            remaining = [
+                index
+                for indices in subject_to_indices.values()
+                for index in indices
+                if index not in already_selected
+            ]
+            rng.shuffle(remaining)
+            label_selected.extend(remaining[: samples_per_stage - len(label_selected)])
+
+        if len(label_selected) < samples_per_stage:
+            print(
+                f"Warning: requested {samples_per_stage} samples for "
+                f"{INDEX_TO_CLASS[label]}, but only found {len(label_selected)}."
+            )
+
+        rng.shuffle(label_selected)
+        selected.extend(label_selected[:samples_per_stage])
+
+    return selected
+
+
 @torch.no_grad()
 def main() -> None:
     args = parse_args()
@@ -57,24 +102,31 @@ def main() -> None:
         seed=args.seed,
         normalize=False,
     )
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
+    selected_indices = select_balanced_indices(
+        dataset=dataset,
+        samples_per_stage=args.samples_per_stage,
+        seed=args.seed,
+    )
+    selected_counts = Counter(dataset.records[index].label for index in selected_indices)
+    print("Selected reconstruction samples:")
+    for label in sorted(INDEX_TO_CLASS):
+        print(f"  {INDEX_TO_CLASS[label]}: {selected_counts.get(label, 0)}")
 
     saved = 0
-    for images, labels, subjects, _ in tqdm(loader, desc="reconstruct"):
-        images = images.to(device)
-        labels = labels.to(device)
+    for dataset_index in tqdm(selected_indices, desc="reconstruct"):
+        image, label, subject, _ = dataset[dataset_index]
+        images = image.unsqueeze(0).to(device)
+        labels = label.unsqueeze(0).to(device)
         recon = model(images, labels)["recon"]
-        class_name = INDEX_TO_CLASS[int(labels.item())].replace(" ", "_")
-        filename = f"{saved:04d}_{subjects[0]}_{class_name}.png"
+        class_name = INDEX_TO_CLASS[int(label.item())].replace(" ", "_")
+        filename = f"{saved:04d}_{subject}_{class_name}.png"
         save_reconstruction_pair(
-            original=images[0].cpu(),
+            original=image.cpu(),
             reconstruction=recon[0].cpu(),
             path=output_dir / filename,
-            title=f"| {INDEX_TO_CLASS[int(labels.item())]}",
+            title=f"| {INDEX_TO_CLASS[int(label.item())]}",
         )
         saved += 1
-        if saved >= args.num_samples:
-            break
 
     print(f"Saved {saved} reconstruction samples to {output_dir}")
 

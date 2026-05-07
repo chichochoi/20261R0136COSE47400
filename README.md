@@ -139,10 +139,23 @@ Reported metrics:
 python scripts/reconstruct.py \
   --data-dir data \
   --cvae-checkpoint checkpoints/cvae/best_cvae.pth \
-  --output-dir outputs/reconstructions
+  --output-dir outputs/reconstructions \
+  --samples-per-stage 5
 ```
 
 Each output image shows the original MRI next to the same-label reconstruction.
+Samples are selected randomly and evenly by stage instead of taking the first
+validation images in file order. With the default setting, the script saves:
+
+```text
+5 Non Demented samples
+5 Very mild Dementia samples
+5 Mild Dementia samples
+```
+
+The sampler uses `--seed` for reproducibility and chooses different subjects
+within each stage when possible. If a stage has fewer available subjects or
+images than requested, the script saves as many as it can and prints a warning.
 
 ## Model Definition
 
