@@ -1,95 +1,21 @@
+"""Smoke test for the aligned Vanilla CVAE baseline.
+
+Verifies model construction, forward pass, loss computation,
+and KL warmup without requiring any data files.
+"""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
-def label_to_onehot(labels: torch.Tensor, num_classes: int) -> torch.Tensor:
-    return F.one_hot(labels, num_classes=num_classes).float()
-
-
-def make_label_map(
-    labels: torch.Tensor,
-    num_classes: int,
-    height: int,
-    width: int,
-) -> torch.Tensor:
-    onehot = label_to_onehot(labels, num_classes)
-    return onehot[:, :, None, None].repeat(1, 1, height, width)
-
-
-class VanillaCVAE(nn.Module):
-    def __init__(
-        self,
-        img_size: int = 224,
-        channels: int = 1,
-        num_classes: int = 3,
-        latent_dim: int = 128,
-    ) -> None:
-        super().__init__()
-        self.img_size = img_size
-        self.channels = channels
-        self.num_classes = num_classes
-        self.latent_dim = latent_dim
-
-        encoder_input_channels = channels + num_classes
-        self.encoder = nn.Sequential(
-            nn.Conv2d(encoder_input_channels, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-
-        self.feature_size = img_size // 16
-        self.flatten_dim = 256 * self.feature_size * self.feature_size
-        self.fc_mu = nn.Linear(self.flatten_dim, latent_dim)
-        self.fc_logvar = nn.Linear(self.flatten_dim, latent_dim)
-        self.decoder_input = nn.Linear(latent_dim + num_classes, self.flatten_dim)
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(32, channels, kernel_size=4, stride=2, padding=1),
-            nn.Sigmoid(),
-        )
-
-    def encode(self, x: torch.Tensor, labels: torch.Tensor):
-        batch_size, _, height, width = x.shape
-        label_map = make_label_map(labels, self.num_classes, height, width).to(x.device)
-        features = self.encoder(torch.cat([x, label_map], dim=1))
-        features = features.view(batch_size, -1)
-        return self.fc_mu(features), self.fc_logvar(features)
-
-    @staticmethod
-    def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        std = torch.exp(0.5 * logvar)
-        return mu + torch.randn_like(std) * std
-
-    def decode(self, z: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        onehot = label_to_onehot(labels, self.num_classes).to(z.device)
-        x = self.decoder_input(torch.cat([z, onehot], dim=1))
-        x = x.view(-1, 256, self.feature_size, self.feature_size)
-        return self.decoder(x)
-
-    def forward(self, x: torch.Tensor, labels: torch.Tensor):
-        mu, logvar = self.encode(x, labels)
-        z = self.reparameterize(mu, logvar)
-        return self.decode(z, labels), mu, logvar
+from vanilla_cvae.losses import kl_warmup_beta, vanilla_cvae_loss
+from vanilla_cvae.models import VanillaCVAE
 
 
 def main() -> None:
@@ -97,7 +23,6 @@ def main() -> None:
     channels = 1
     num_classes = 3
     latent_dim = 128
-    beta = 1.0
 
     model = VanillaCVAE(
         img_size=img_size,
@@ -108,18 +33,41 @@ def main() -> None:
 
     x = torch.rand(2, channels, img_size, img_size)
     labels = torch.tensor([0, num_classes - 1], dtype=torch.long)
-    recon, mu, logvar = model(x, labels)
-    recon_loss = F.binary_cross_entropy(recon, x, reduction="mean")
-    kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-    loss = recon_loss + beta * kl_loss
-    loss.backward()
+    output = model(x, labels)
 
-    assert recon.shape == x.shape
-    assert mu.shape == (2, latent_dim)
-    assert logvar.shape == (2, latent_dim)
+    recon = output["recon"]
+    mu = output["mu"]
+    logvar = output["logvar"]
+
+    assert recon.shape == x.shape, f"Recon shape mismatch: {recon.shape} vs {x.shape}"
+    assert mu.shape == (2, latent_dim), f"Mu shape mismatch: {mu.shape}"
+    assert logvar.shape == (2, latent_dim), f"Logvar shape mismatch: {logvar.shape}"
+
+    # Test loss computation
+    losses = vanilla_cvae_loss(recon, x, mu, logvar, beta_kl=1.0)
+    losses["total"].backward()
+    assert "total" in losses
+    assert "reconstruction" in losses
+    assert "kl" in losses
+
+    # Test KL warmup
+    assert kl_warmup_beta(0, warmup_epochs=5, target_beta=1.0) == 0.0
+    assert kl_warmup_beta(3, warmup_epochs=5, target_beta=1.0) == 0.6
+    assert kl_warmup_beta(5, warmup_epochs=5, target_beta=1.0) == 1.0
+    assert kl_warmup_beta(10, warmup_epochs=5, target_beta=1.0) == 1.0
+
     print("Vanilla CVAE smoke test passed.")
     print(f"Image size: {img_size} | Classes: {num_classes} | Latent dim: {latent_dim}")
-    print(f"Loss: {loss.item():.4f} | Recon: {recon_loss.item():.4f} | KL: {kl_loss.item():.4f}")
+    print(f"Loss: {losses['total'].item():.4f} | Recon: {losses['reconstruction'].item():.4f} | KL: {losses['kl'].item():.4f}")
+    print("KL warmup schedule verified.")
+    print()
+    print("Training setup (aligned with UNet CVAE):")
+    print("  Optimizer:       AdamW (weight_decay=1e-5)")
+    print("  Scheduler:       CosineAnnealingLR")
+    print("  Grad clipping:   max_norm=1.0")
+    print("  Epochs:          50")
+    print("  KL warmup:       5 epochs (linear ramp)")
+    print("  Data split:      Subject-based stratified (same as UNet)")
 
 
 if __name__ == "__main__":

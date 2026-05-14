@@ -1,62 +1,123 @@
 # Vanilla CVAE Baseline
 
-This folder contains the baseline vanilla CVAE experiment.
+This folder contains the baseline vanilla CVAE experiment, aligned with the
+main U-Net CVAE experiment for fair comparison.
+
+## What Changed (Aligned Baseline)
+
+The original notebook-based baseline had several experimental-setup differences
+that made fair comparison impossible. This version fixes them:
+
+| Setting | Old Baseline | Aligned Baseline | UNet CVAE |
+|---------|-------------|-----------------|-----------|
+| Data split | Random image-level | **Subject-based** | Subject-based |
+| Epochs | 10 | **50** | 50 |
+| Optimizer | Adam | **AdamW** (wd=1e-5) | AdamW (wd=1e-5) |
+| Scheduler | None | **CosineAnnealing** | CosineAnnealing |
+| Grad clipping | None | **max_norm=1.0** | max_norm=1.0 |
+| KL warmup | None | **5 epochs** (linear) | N/A |
+| Val set | 17,189 images | Same as UNet | Same as UNet |
+
+The **model architecture is unchanged**: no skip connections, no classifier
+guidance. These are the two features being tested by comparison.
 
 ## Contents
 
 ```text
 vanilla/
-  Baseline_Vanilla_CVAE.ipynb
+  configs/default.yaml
   scripts/
+    train_cvae.py
+    evaluate.py
     smoke_test.py
-  checkpoints_vanilla_cvae/
-    best_vanilla_cvae.pth          # created after training the aligned baseline
-  outputs_vanilla_cvae/            # created after training the aligned baseline
-  legacy_4class_run/
-    checkpoints_vanilla_cvae/
-    outputs_vanilla_cvae/
+  src/vanilla_cvae/
+    data.py
+    losses.py
+    metrics.py
+    models.py
+    utils.py
+  Baseline_Vanilla_CVAE.ipynb      # Legacy notebook (kept for reference)
+  Vanilla_CVAE_Baseline.ipynb      # Legacy notebook (kept for reference)
 ```
 
-## Model Shape
+## Setup
 
-The notebook defines `VanillaCVAE` with:
-
-- grayscale MRI input
-- image size `224`
-- three dementia classes: `Non Demented`, `Very mild Dementia`, `Mild Dementia`
-- latent dimension `128`
-- label conditioning through encoder label maps and decoder one-hot vectors
-- binary cross entropy reconstruction loss
-- KL regularization weight `1.0`
-- no U-Net skip connections
-- no classifier-guided loss
-
-This is the baseline comparison target for the main U-Net CVAE experiment in
-`../unet`.
-
-`legacy_4class_run/` contains the previous unaligned 128-resolution, four-class
-run artifacts. They are kept for reference only and are not compatible with the
-current aligned baseline model.
-
-## Run
-
-Open `Vanilla_CVAE_Baseline.ipynb` in Jupyter or Colab and run the cells from
-top to bottom. The notebook writes datasets, outputs, and checkpoints inside
-this `vanilla/` folder. It downloads the OASIS dataset from Kaggle when Kaggle
-credentials are configured.
-
-For a local Jupyter environment:
+Windows PowerShell:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-jupyter notebook Vanilla_CVAE_Baseline.ipynb
 ```
 
-To verify the aligned baseline model structure without re-running training:
+## 1. Smoke Test
+
+Run this first. No data required.
+
+```bash
+python scripts/smoke_test.py
+```
+
+## 2. Train the Vanilla CVAE
 
 ```powershell
-python scripts\smoke_test.py
+python scripts\train_cvae.py --data-dir data
 ```
+
+The data directory should contain class folders directly:
+
+```text
+data/
+  Non Demented/
+  Very mild Dementia/
+  Mild Dementia/
+```
+
+The saved model is:
+
+```text
+checkpoints/vanilla_cvae/best_vanilla_cvae.pth
+```
+
+## 3. Evaluate
+
+Use the **same classifier checkpoint** as the UNet experiment for fair
+comparison:
+
+```powershell
+python scripts\evaluate.py `
+  --data-dir data `
+  --cvae-checkpoint checkpoints\vanilla_cvae\best_vanilla_cvae.pth `
+  --classifier-checkpoint ..\unet\checkpoints\classifier\best_classifier.pth
+```
+
+Reported metrics (identical to UNet evaluation):
+
+- Reconstruction MSE
+- PSNR
+- SSIM
+- Recon Loss (BCE), KL Loss, Val Loss
+- Classifier target confidence on reconstructions
+- Classifier accuracy on reconstructions
+- Confusion matrix
+
+## Model Definition
+
+The CVAE encodes a grayscale MRI slice concatenated with a spatial label map.
+The class label is provided as a one-hot vector concatenated with `z` at the
+bottleneck before decoding. **No skip connections** are used.
+
+Training loss:
+
+```text
+L = L_reconstruction + beta(t) * L_KL
+```
+
+Where `beta(t)` linearly warms up from 0 to 1.0 over the first 5 epochs.
+
+This baseline intentionally omits:
+- U-Net skip connections
+- Classifier-guided loss
+
+These are the two architectural features being evaluated by the main experiment.
