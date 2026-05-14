@@ -40,7 +40,7 @@ current aligned baseline model.
 
 ## Run
 
-Open `Baseline_Vanilla_CVAE.ipynb` in Jupyter or Colab and run the cells from
+Open `Vanilla_CVAE_Baseline.ipynb` in Jupyter or Colab and run the cells from
 top to bottom. The notebook writes datasets, outputs, and checkpoints inside
 this `vanilla/` folder. It downloads the OASIS dataset from Kaggle when Kaggle
 credentials are configured.
@@ -52,7 +52,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-jupyter notebook Baseline_Vanilla_CVAE.ipynb
+jupyter notebook Vanilla_CVAE_Baseline.ipynb
 ```
 
 To verify the aligned baseline model structure without re-running training:
